@@ -49,7 +49,7 @@ tools = [
 # TEXT may be passed here.
 CONFIG = types.LiveConnectConfig(
     response_modalities=[
-        "audio",
+        "TEXT",
     ],
     speech_config=types.SpeechConfig(
         voice_config=types.VoiceConfig(
