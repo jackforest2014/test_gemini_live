@@ -1,0 +1,8 @@
+google-generativeai>=0.3.0
+python-dotenv>=1.0.0
+pyaudio>=0.2.13
+SpeechRecognition>=3.10.0
+pydub>=0.25.1
+opencv-python>=4.8.0
+Pillow>=10.0.0
+mss>=9.0.1 
