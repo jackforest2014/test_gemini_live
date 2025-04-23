@@ -1,21 +1,16 @@
 """
 ## Documentation
-Quickstart: https://github.com/google-gemini/cookbook/blob/main/quickstarts/Get_started_LiveAPI.py
+Quickstart: https://github.com/google/generative-ai-python
 
 ## Setup
-
 To install the dependencies for this script, run:
-`uv sync`
+pip install -r requirements.txt
 """
 
 import asyncio
 import base64
 import io
 import traceback
-import os
-
-# Set OpenCV environment variable to skip authorization request
-os.environ['OPENCV_AVFOUNDATION_SKIP_AUTH'] = '1'
 
 import cv2
 import pyaudio
@@ -24,37 +19,53 @@ import mss
 
 import argparse
 
-import google.generativeai as genai
-import dotenv
 import os
-dotenv.load_dotenv()
+import time
+import wave
+import speech_recognition as sr
+from dotenv import load_dotenv
+import numpy as np
+import asyncio
+import threading
+import pytesseract
+from PIL import Image
+import google.generativeai as genai
 
-FORMAT = pyaudio.paInt16
-CHANNELS = 1
-SEND_SAMPLE_RATE = 16000
-RECEIVE_SAMPLE_RATE = 24000
-CHUNK_SIZE = 1024
+# Load environment variables
+load_dotenv()
 
-MODEL = "gemini-pro"
-
-DEFAULT_MODE = "camera"
-
-# Configure the Gemini API
+# Configure Gemini API
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
 genai.configure(api_key=GEMINI_API_KEY)
 
-pya = pyaudio.PyAudio()
+# Audio recording parameters
+CHUNK = 1024
+FORMAT = pyaudio.paInt16
+CHANNELS = 1
+RATE = 44100
+RECORD_SECONDS = 5
+WAVE_OUTPUT_FILENAME = "temp_recording.wav"
 
+# Screenshot parameters
+SCREENSHOT_INTERVAL = 1.0  # Take a screenshot every 1 second
+
+MODEL = "gemini-2.0-pro-vision-latest"
+
+DEFAULT_MODE = "camera"
+
+# Initialize the model
+model = genai.GenerativeModel('gemini-pro-vision')
+
+# Create a chat session
+chat = model.start_chat(history=[])
+
+pya = pyaudio.PyAudio()
 
 class AudioLoop:
     def __init__(self, video_mode=DEFAULT_MODE):
         self.video_mode = video_mode
-
         self.audio_in_queue = None
         self.out_queue = None
-
-        self.session = None
-
         self.send_text_task = None
         self.receive_audio_task = None
         self.play_audio_task = None
@@ -67,104 +78,72 @@ class AudioLoop:
             )
             if text.lower() == "q":
                 break
-            # Use the current Gemini API
-            model = genai.GenerativeModel(MODEL)
-            response = model.generate_content(text)
-            print(f"Gemini: {response.text}")
+            
+            # Send text to chat and get response
+            response = await asyncio.to_thread(
+                chat.send_message,
+                text or "."
+            )
+            print(f"\nGemini: {response.text}\n")
 
     def _get_frame(self, cap):
-        try:
-            # Read the frame
-            ret, frame = cap.read()
-            # Check if the frame was read successfully
-            if not ret:
-                return None
-            # Fix: Convert BGR to RGB color space
-            # OpenCV captures in BGR but PIL expects RGB format
-            # This prevents the blue tint in the video feed
-            frame_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-            img = PIL.Image.fromarray(frame_rgb)  # Now using RGB frame
-            img.thumbnail([1024, 1024])
-
-            image_io = io.BytesIO()
-            img.save(image_io, format="jpeg")
-            image_io.seek(0)
-
-            mime_type = "image/jpeg"
-            image_bytes = image_io.read()
-            return {"mime_type": mime_type, "data": base64.b64encode(image_bytes).decode()}
-        except Exception as e:
-            print(f"Error processing frame: {str(e)}")
+        # Read the frame
+        ret, frame = cap.read()
+        # Check if the frame was read successfully
+        if not ret:
             return None
+        # Fix: Convert BGR to RGB color space
+        frame_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+        img = PIL.Image.fromarray(frame_rgb)
+        img.thumbnail([1024, 1024])
+        return img
 
     async def get_frames(self):
-        try:
-            # Set the backend to AVFoundation explicitly
-            cap = await asyncio.to_thread(
-                cv2.VideoCapture, 0, cv2.CAP_AVFOUNDATION
-            )  # 0 represents the default camera
-            
-            if not cap.isOpened():
-                print("Error: Could not open camera. Please check camera permissions.")
-                return
+        cap = await asyncio.to_thread(
+            cv2.VideoCapture, 0
+        )
 
-            while True:
-                frame = await asyncio.to_thread(self._get_frame, cap)
-                if frame is None:
-                    print("Error: Could not read frame from camera.")
-                    break
+        while True:
+            frame = await asyncio.to_thread(self._get_frame, cap)
+            if frame is None:
+                break
 
-                await asyncio.sleep(1.0)
-                await self.out_queue.put(frame)
+            await asyncio.sleep(1.0)
+            await self.out_queue.put(frame)
 
-        except Exception as e:
-            print(f"Camera error: {str(e)}")
-        finally:
-            # Release the VideoCapture object
-            if 'cap' in locals():
-                cap.release()
+        cap.release()
 
     def _get_screen(self):
         sct = mss.mss()
         monitor = sct.monitors[0]
-
-        i = sct.grab(monitor)
-
-        mime_type = "image/jpeg"
-        image_bytes = mss.tools.to_png(i.rgb, i.size)
-        img = PIL.Image.open(io.BytesIO(image_bytes))
-
-        image_io = io.BytesIO()
-        img.save(image_io, format="jpeg")
-        image_io.seek(0)
-
-        image_bytes = image_io.read()
-        return {"mime_type": mime_type, "data": base64.b64encode(image_bytes).decode()}
+        screenshot = sct.grab(monitor)
+        
+        # Convert to PIL Image
+        img = PIL.Image.frombytes('RGB', screenshot.size, screenshot.rgb)
+        img.thumbnail([1024, 1024])
+        return img
 
     async def get_screen(self):
-
         while True:
             frame = await asyncio.to_thread(self._get_screen)
             if frame is None:
                 break
             
             await asyncio.sleep(1.0)
-
             await self.out_queue.put(frame)
 
     async def send_realtime(self):
         while True:
-            msg = await self.out_queue.get()
-            # Check the mime type to determine how to handle the data
-            if msg["mime_type"] == "image/jpeg":
-                # For images, we can send directly as the data is already in the correct format
-                model = genai.GenerativeModel(MODEL)
-                response = model.generate_content([msg["data"], "What's in this image?"])
-                print(f"Gemini: {response.text}")
-            elif msg["mime_type"] == "audio/pcm":
-                # For audio data, we'll skip processing for now
-                # In a future version, we could add audio transcription here
-                continue
+            img = await self.out_queue.get()
+            # Process the frame with Gemini Vision
+            response = await asyncio.to_thread(
+                model.generate_content,
+                [
+                    "Describe what you see in this image.",
+                    img
+                ]
+            )
+            print(f"\nGemini Vision: {response.text}\n")
 
     async def listen_audio(self):
         mic_info = pya.get_default_input_device_info()
@@ -172,32 +151,30 @@ class AudioLoop:
             pya.open,
             format=FORMAT,
             channels=CHANNELS,
-            rate=SEND_SAMPLE_RATE,
+            rate=RATE,
             input=True,
             input_device_index=mic_info["index"],
-            frames_per_buffer=CHUNK_SIZE,
+            frames_per_buffer=CHUNK,
         )
         if __debug__:
             kwargs = {"exception_on_overflow": False}
         else:
             kwargs = {}
         while True:
-            data = await asyncio.to_thread(self.audio_stream.read, CHUNK_SIZE, **kwargs)
+            data = await asyncio.to_thread(self.audio_stream.read, CHUNK, **kwargs)
             await self.out_queue.put({"data": data, "mime_type": "audio/pcm"})
 
     async def receive_audio(self):
-        "Background task to reads from the websocket and write pcm chunks to the output queue"
         while True:
-            # This is a placeholder for the audio response
-            # In the current API, we don't have direct audio responses
-            await asyncio.sleep(1.0)
+            data = await self.audio_in_queue.get()
+            print(f"Received audio data: {len(data)} bytes")
 
     async def play_audio(self):
         stream = await asyncio.to_thread(
             pya.open,
             format=FORMAT,
             channels=CHANNELS,
-            rate=RECEIVE_SAMPLE_RATE,
+            rate=RATE,
             output=True,
         )
         while True:
@@ -213,6 +190,7 @@ class AudioLoop:
                 send_text_task = tg.create_task(self.send_text())
                 tg.create_task(self.send_realtime())
                 tg.create_task(self.listen_audio())
+                
                 if self.video_mode == "camera":
                     tg.create_task(self.get_frames())
                 elif self.video_mode == "screen":
@@ -230,10 +208,9 @@ class AudioLoop:
             self.audio_stream.close()
             traceback.print_exception(EG)
 
-
 if __name__ == "__main__":
     """
-    uv run main.py --mode screen
+    python test_audio_screen.py --mode screen
     """
     parser = argparse.ArgumentParser()
     parser.add_argument(
