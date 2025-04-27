@@ -33,10 +33,12 @@ RECEIVE_SAMPLE_RATE = 24000
 CHUNK_SIZE = 1024
 
 MODEL = "models/gemini-2.0-flash-live-001"
+MODEL = "gemini-2.0-flash-live-001"
 
 DEFAULT_MODE = "camera"
 
-client = genai.Client(http_options={"api_version": "v1alpha"}, api_key=os.getenv("GEMINI_API_KEY"))
+# client = genai.Client(http_options={"api_version": "v1alpha"}, api_key=os.getenv("GEMINI_API_KEY"))
+client = genai.Client(api_key=os.getenv("GEMINI_API_KEY"))
 
 tools = [
     types.Tool(
@@ -51,13 +53,15 @@ CONFIG = types.LiveConnectConfig(
     response_modalities=[
         "TEXT",
     ],
-    speech_config=types.SpeechConfig(
-        voice_config=types.VoiceConfig(
-            prebuilt_voice_config=types.PrebuiltVoiceConfig(voice_name="Puck")
-        )
-    ),
+    # speech_config=types.SpeechConfig(
+    #     voice_config=types.VoiceConfig(
+    #         prebuilt_voice_config=types.PrebuiltVoiceConfig(voice_name="Puck")
+    #     )
+    # ),
     tools=tools,
 )
+
+config = {"response_modalities": ["TEXT"]}
 
 pya = pyaudio.PyAudio()
 
@@ -155,8 +159,34 @@ class AudioLoop:
 
     async def send_realtime(self):
         while True:
-            msg = await self.out_queue.get()
-            await self.session.send(input=msg)
+            try:
+                msg = await self.out_queue.get()
+                if isinstance(msg, dict) and "mime_type" in msg and msg["mime_type"] == "audio/pcm":
+                    # Handle audio data
+                    await self.session.send_realtime_input(
+                        media=types.Blob(data=msg["data"], mime_type="audio/pcm;rate=16000")
+                    )
+                elif isinstance(msg, str):
+                    # Handle text messages
+                    await self.session.send_client_content(
+                        turns={"role": "user", "parts": [{"text": msg}]}, 
+                        turn_complete=False
+                    )
+                else:
+                    # Handle other types of messages (like images)
+                    await self.session.send_client_content(
+                        turns={"role": "user", "parts": [{"text": str(msg)}]}, 
+                        turn_complete=False
+                    )
+            except Exception as e:
+                print("[", str(e),"]")
+                if "quota" in str(e).lower():
+                    print("\nError: API quota exceeded. Please check your Google AI Studio account.")
+                    print("Visit https://makersuite.google.com/app/apikey to check your quota.")
+                    break
+                else:
+                    print(f"\nError in send_realtime: {e}")
+                    break
 
     async def listen_audio(self):
         mic_info = pya.get_default_input_device_info()
@@ -180,20 +210,29 @@ class AudioLoop:
     async def receive_audio(self):
         "Background task to reads from the websocket and write pcm chunks to the output queue"
         while True:
-            turn = self.session.receive()
-            async for response in turn:
-                if data := response.data:
-                    self.audio_in_queue.put_nowait(data)
-                    continue
-                if text := response.text:
-                    print(text, end="")
+            try:
+                turn = self.session.receive()
+                async for response in turn:
+                    if data := response.data:
+                        self.audio_in_queue.put_nowait(data)
+                        continue
+                    if text := response.text:
+                        print(text, end="")
 
-            # If you interrupt the model, it sends a turn_complete.
-            # For interruptions to work, we need to stop playback.
-            # So empty out the audio queue because it may have loaded
-            # much more audio than has played yet.
-            while not self.audio_in_queue.empty():
-                self.audio_in_queue.get_nowait()
+                # If you interrupt the model, it sends a turn_complete.
+                # For interruptions to work, we need to stop playback.
+                # So empty out the audio queue because it may have loaded
+                # much more audio than has played yet.
+                while not self.audio_in_queue.empty():
+                    self.audio_in_queue.get_nowait()
+            except Exception as e:
+                if "quota" in str(e).lower():
+                    print("\nError: API quota exceeded. Please check your Google AI Studio account.")
+                    print("Visit https://makersuite.google.com/app/apikey to check your quota.")
+                    break
+                else:
+                    print(f"\nError in receive_audio: {e}")
+                    break
 
     async def play_audio(self):
         stream = await asyncio.to_thread(
@@ -210,7 +249,7 @@ class AudioLoop:
     async def run(self):
         try:
             async with (
-                client.aio.live.connect(model=MODEL, config=CONFIG) as session,
+                client.aio.live.connect(model=MODEL, config=config) as session,
                 asyncio.TaskGroup() as tg,
             ):
                 self.session = session
