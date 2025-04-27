@@ -1,3 +1,12 @@
+# macOS system files
+.DS_Store
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
+ehthumbs.db
+Thumbs.db
+
 # Python
 __pycache__/
 *.py[cod]
@@ -21,17 +30,21 @@ wheels/
 *.egg
 
 # Virtual Environment
-.env
-.venv
-env/
 venv/
 ENV/
+env/
+.env
 
 # IDE
 .idea/
 .vscode/
 *.swp
 *.swo
+
+# Temporary files
+temp_*
+*.tmp
+*.temp
 
 # Project specific
 temp_recording.wav
